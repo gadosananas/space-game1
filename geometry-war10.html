@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>Geometry Wars – Twin-Stick, Neon-Glow & Spawning Fixad</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: black; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+  // --- Canvas setup ---
+  const canvas = document.getElementById("game");
+  const ctx    = canvas.getContext("2d");
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+
+  // --- Sprites som Base64 ---
+  const playerImg = new Image(), enemyImg = new Image();
+  let loaded = 0;
+  playerImg.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAbUlEQVR4nO2WSQoAIAzExP//uZ68CGIXIQx0zhZiBkrH6HSqMbPK+PzFwQDs3xcsiBtAAU7tyRqEDaAAN92JGkQNoAAvzcEaBA2gAF69gRrEDKAA0SXjfC9kAAXIXjyOOREDKEDx7H7N4wY6eBbtwjL+E9KLngAAAABJRU5ErkJggg==';
+  enemyImg.src  = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAc0lEQVR4nO2WSQ4AIAgD0f//Ge8myuahjfSMMhliUKTze4ZVoCL6oMmxz6xeXo0JcKP3xDqPbwACIDsGzzkOAxAA0TF463kMQAB4tUbGxWUAAsDSG30tfAYgAE6aMzuD0wAEwK47u7J5DcCk+m3nN9CpZgHtoQRKFgkFNgAAAABJRU5ErkJggg==';
+  playerImg.onload = enemyImg.onload = () => {
+    if (++loaded === 2) requestAnimationFrame(loop);
+  };
+
+  // --- Bakgrundsstjärnor ---
+  let stars = [];
+  for (let i = 0; i < 200; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: Math.random() * 2,
+      speed: 0.5 + Math.random()
+    });
+  }
+
+  // --- Spelardata & tillstånd ---
+  const player = { x: canvas.width/2, y: canvas.height/2, size:20, speed:4, angle:0 };
+  let keys       = {},
+      mouseX     = player.x,
+      mouseY     = player.y,
+      mouseDown  = false,
+      bullets    = [],
+      enemies    = [],
+      powerUps   = [],
+      particles  = [],
+      bosses     = [],
+      score      = 0,
+      lives      = 3,
+      maxLives   = 5,
+      multiShot  = false,
+      autoAim    = false,
+      fireCD     = 0,
+      level      = 1,
+      timeElapsed= 0,
+      gameOver   = false;
+
+  // --- Händelser ---
+  canvas.addEventListener("mousemove", e => {
+    const r = canvas.getBoundingClientRect();
+    mouseX = e.clientX - r.left;
+    mouseY = e.clientY - r.top;
+  });
+  canvas.addEventListener("mousedown", () => mouseDown = true);
+  canvas.addEventListener("mouseup",   () => mouseDown = false);
+  document.addEventListener("keydown", e => keys[e.key] = true);
+  document.addEventListener("keyup",   e => keys[e.key] = false);
+
+  // --- Spawns: Power-ups ---
+  setInterval(() => {
+    const types = ["multi","autoaim","health"];
+    const t = types[Math.floor(Math.random() * types.length)];
+    powerUps.push({
+      x: Math.random()*canvas.width,
+      y: Math.random()*canvas.height,
+      size: 10,
+      type: t,
+      color: t==="multi" ? "gold" : t==="autoaim" ? "magenta" : "lime"
+    });
+  }, 10000);
+
+  // --- Spawns: Normala fiender ---
+  function spawnEnemy(){
+    const side = Math.floor(Math.random()*4);
+    let x,y;
+    if (side===0)      { x=0;             y=Math.random()*canvas.height; }
+    else if (side===1) { x=canvas.width;  y=Math.random()*canvas.height; }
+    else if (side===2) { x=Math.random()*canvas.width; y=0;           }
+    else               { x=Math.random()*canvas.width; y=canvas.height; }
+    enemies.push({ x,y,size:20,speed:1.5,angle:0 });
+  }
+  setInterval(spawnEnemy, 1000);
+
+  // --- Boss-spawn ---
+  function spawnBoss(){
+    bosses.push({
+      x: Math.random()*canvas.width,
+      y: 0,
+      size: 60,
+      speed: 1 + level*0.2,
+      hp: 10 + level*2,
+      color: "purple",
+      angle: 0
+    });
+  }
+
+  // --- Hjälpfunktioner ---
+  function createParticles(x,y,c){
+    for (let i=0;i<15;i++){
+      particles.push({
+        x,y,
+        dx:(Math.random()-0.5)*4,
+        dy:(Math.random()-0.5)*4,
+        life:30,
+        color:c
+      });
+    }
+  }
+  function getAutoAim(){
+    if (!enemies.length) return {dx:1,dy:0};
+    const n = enemies.reduce((a,b)=>
+      Math.hypot(player.x-a.x,player.y-a.y) < Math.hypot(player.x-b.x,player.y-b.y) ? a : b
+    );
+    const dx=n.x-player.x, dy=n.y-player.y, d=Math.hypot(dx,dy);
+    return {dx:dx/d,dy:dy/d};
+  }
+
+  // --- Skjutfunktion med korrekt nos-koordinater ---
+  function tryFire(){
+    if (!mouseDown || fireCD>0) return;
+    // räkna ut vinkel mot mus
+    player.angle = Math.atan2(mouseY-player.y, mouseX-player.x);
+    // dir-vektor
+    const dirX = Math.cos(player.angle),
+          dirY = Math.sin(player.angle);
+    // nos-koordinat
+    const noseX = player.x + dirX * player.size,
+          noseY = player.y + dirY * player.size;
+    // välj riktning
+    const dir = autoAim ? getAutoAim() : {dx:dirX,dy:dirY};
+    // skapa kulor
+    bullets.push({x:noseX,y:noseY,dx:dir.dx,dy:dir.dy,size:5,speed:10});
+    if (multiShot){
+      bullets.push({x:noseX,y:noseY,dx:dir.dx-0.3,dy:dir.dy,size:5,speed:10});
+      bullets.push({x:noseX,y:noseY,dx:dir.dx+0.3,dy:dir.dy,size:5,speed:10});
+    }
+    fireCD = 8;
+  }
+
+  // --- Huvudloop ---
+  function loop(){
+    if (gameOver) return;
+
+    // Bakgrund + stjärnor
+    ctx.fillStyle="black"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    stars.forEach(s=>{
+      s.y += s.speed;
+      if (s.y > canvas.height) { s.y=0; s.x=Math.random()*canvas.width; }
+      ctx.fillStyle="white";
+      ctx.fillRect(s.x,s.y,s.size,s.size);
+    });
+
+    // Rörelse WASD/pilar
+    if (keys["w"]||keys["ArrowUp"])    player.y -= player.speed;
+    if (keys["s"]||keys["ArrowDown"])  player.y += player.speed;
+    if (keys["a"]||keys["ArrowLeft"])  player.x -= player.speed;
+    if (keys["d"]||keys["ArrowRight"]) player.x += player.speed;
+    // stay on screen
+    player.x = Math.max(0, Math.min(canvas.width,  player.x));
+    player.y = Math.max(0, Math.min(canvas.height, player.y));
+
+    // Skjut
+    fireCD--; tryFire();
+
+    // Rita spelare med neon-glow
+    ctx.save();
+    ctx.shadowBlur=20; ctx.shadowColor="cyan";
+    ctx.translate(player.x,player.y);
+    ctx.rotate(player.angle + Math.PI/2);
+    ctx.drawImage(playerImg,-player.size,-player.size,player.size*2,player.size*2);
+    ctx.restore(); ctx.shadowBlur=0;
+
+    // Skott med glow
+    bullets = bullets.filter(b=>b.x>0&&b.y>0&&b.x<canvas.width&&b.y<canvas.height);
+    bullets.forEach(b=>{
+      b.x += b.dx*b.speed; b.y += b.dy*b.speed;
+      ctx.save();
+      ctx.shadowBlur=10; ctx.shadowColor="white";
+      ctx.fillStyle="white";
+      ctx.beginPath(); ctx.arc(b.x,b.y,b.size,0,Math.PI*2); ctx.fill();
+      ctx.restore(); ctx.shadowBlur=0;
+    });
+
+    // Fiender med glow & rotation
+    enemies.forEach((e,ei)=>{
+      const dx = player.x - e.x,
+            dy = player.y - e.y,
+            d  = Math.hypot(dx,dy);
+      e.angle = Math.atan2(dy,dx);
+      e.x += (dx/d)*e.speed; e.y += (dy/d)*e.speed;
+
+      // koll mot spelare
+      if (d < player.size + e.size){
+        enemies.splice(ei,1);
+        lives--;
+        if (lives<=0){
+          alert("Game Over! Poäng: "+score);
+          return location.reload();
+        }
+      }
+
+      // koll mot skott
+      bullets.forEach((b,bi)=>{
+        if (Math.hypot(b.x-e.x,b.y-e.y) < b.size + e.size){
+          createParticles(e.x,e.y,"orange");
+          bullets.splice(bi,1);
+          enemies.splice(ei,1);
+          score++;
+        }
+      });
+
+      // rita roterad fiende
+      ctx.save();
+      ctx.shadowBlur=20; ctx.shadowColor="red";
+      ctx.translate(e.x,e.y);
+      ctx.rotate(e.angle + Math.PI/2);
+      ctx.drawImage(enemyImg,-e.size,-e.size,e.size*2,e.size*2);
+      ctx.restore(); ctx.shadowBlur=0;
+    });
+
+    // Power-ups
+    powerUps.forEach((p,i)=>{
+      ctx.fillStyle=p.color;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
+      ctx.fill();
+      if (Math.hypot(player.x-p.x,player.y-p.y)<player.size+p.size){
+        if (p.type==="multi")   { multiShot=true; setTimeout(()=>multiShot=false,5000); }
+        if (p.type==="autoaim") { autoAim=true; setTimeout(()=>autoAim=false,5000); }
+        if (p.type==="health"&&lives<maxLives) lives++;
+        powerUps.splice(i,1);
+      }
+    });
+
+    // Bossar, partiklar, UI, nivåhantering...
+    requestAnimationFrame(loop);
+  }
+</script>
+</body>
+</html>

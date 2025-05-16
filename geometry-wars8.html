@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <title>Geometry Wars – Twin-Stick & Neon-Glow</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: black; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+  // --- Canvas setup ---
+  const canvas = document.getElementById("game");
+  const ctx    = canvas.getContext("2d");
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+
+  // --- Inbyggda 32×32 Pixel-Art-Sprites som Base64 ---
+  const playerImg = new Image(), enemyImg = new Image();
+  let imagesLoaded = 0;
+  playerImg.src = 
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAbUlEQVR4nO2WSQoAIAzExP//uZ68CGIXIQx0zhZiBkrH6HSqMbPK+PzFwQDs3xcsiBtAAU7tyRqEDaAAN92JGkQNoAAvzcEaBA2gAF69gRrEDKAA0SXjfC9kAAXIXjyOOREDKEDx7H7N4wY6eBbtwjL+E9KLngAAAABJRU5ErkJggg==";
+  enemyImg.src  = 
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAc0lEQVR4nO2WSQ4AIAgD0f//Ge8myuahjfSMMhliUKTze4ZVoCL6oMmxz6xeXo0JcKP3xDqPbwACIDsGzzkOAxAA0TF463kMQAB4tUbGxWUAAsDSG30tfAYgAE6aMzuD0wAEwK47u7J5DcCk+m3nN9CpZgHtoQRKFgkFNgAAAABJRU5ErkJggg==";
+  playerImg.onload = enemyImg.onload = () => {
+    if (++imagesLoaded === 2) requestAnimationFrame(loop);
+  };
+
+  // --- Bakgrundsstjärnor ---
+  let stars = [];
+  for (let i = 0; i < 200; i++) {
+    stars.push({
+      x:     Math.random() * canvas.width,
+      y:     Math.random() * canvas.height,
+      size:  Math.random() * 2,
+      speed: 0.5 + Math.random()
+    });
+  }
+
+  // --- Spelardata & tillstånd ---
+  const player = {
+    x:     canvas.width / 2,
+    y:     canvas.height / 2,
+    size:  20,
+    speed: 4,
+    angle: 0  // kommer uppdateras mot mus
+  };
+
+  let keys         = {},
+      mouseX       = player.x,
+      mouseY       = player.y,
+      mouseDown    = false,
+      bullets      = [],
+      enemies      = [],
+      powerUps     = [],
+      particles    = [],
+      bosses       = [],
+      score        = 0,
+      lives        = 3,
+      maxLives     = 5,
+      multiShot    = false,
+      autoAim      = false,
+      fireCooldown = 0,
+      level        = 1,
+      timeElapsed  = 0,
+      gameOver     = false;
+
+  // --- Händelser ---
+  canvas.addEventListener("mousemove", e => {
+    const r = canvas.getBoundingClientRect();
+    mouseX = e.clientX - r.left;
+    mouseY = e.clientY - r.top;
+  });
+  canvas.addEventListener("mousedown", () => mouseDown = true);
+  canvas.addEventListener("mouseup",   () => mouseDown = false);
+  document.addEventListener("keydown", e => { keys[e.key] = true; });
+  document.addEventListener("keyup",   e => { keys[e.key] = false; });
+
+  // --- Spawns: Power-ups & Fiender ---
+  setInterval(() => {
+    const types = ["multi","autoaim","health"];
+    const t     = types[Math.floor(Math.random() * types.length)];
+    powerUps.push({
+      x:     Math.random() * canvas.width,
+      y:     Math.random() * canvas.height,
+      size:  10,
+      type:  t,
+      color: t === "multi"   ? "gold"
+           : t === "autoaim" ? "magenta"
+           : "lime"
+    });
+  }, 10000);
+
+  setInterval(() => {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0)      { x = 0;             y = Math.random() * canvas.height; }
+    else if (side === 1) { x = canvas.width;  y = Math.random() * canvas.height; }
+    else if (side === 2) { x = Math.random() * canvas.width; y = 0; }
+    else                 { x = Math.random() * canvas.width; y = canvas.height; }
+    enemies.push({ x, y, size:20, speed:1.5, angle:0 });
+  }, 1000);
+
+  function spawnBoss(){
+    bosses.push({
+      x:     Math.random() * canvas.width,
+      y:     0,
+      size:  60,
+      speed: 1 + level * 0.2,
+      hp:    10 + level * 2,
+      color: "purple",
+      angle: 0
+    });
+  }
+
+  // --- Hjälpfunktioner ---
+  function createParticles(x, y, color){
+    for (let i = 0; i < 15; i++){
+      particles.push({
+        x, y,
+        dx:   (Math.random() - 0.5) * 4,
+        dy:   (Math.random() - 0.5) * 4,
+        life: 30,
+        color
+      });
+    }
+  }
+
+  function getAutoAimDirection(){
+    if (!enemies.length) return { dx:1, dy:0 };
+    const n = enemies.reduce((a,b) =>
+      Math.hypot(player.x - a.x, player.y - a.y) < Math.hypot(player.x - b.x, player.y - b.y) ? a : b
+    );
+    const dx = n.x - player.x,
+          dy = n.y - player.y,
+          d  = Math.hypot(dx, dy);
+    return { dx: dx / d, dy: dy / d };
+  }
+
+  // --- Skjutfunktion ---
+  function tryFire(){
+    if (!mouseDown || fireCooldown > 0) return;
+    // Räkna ut vinkel mot mus
+    player.angle = Math.atan2(mouseY - player.y, mouseX - player.x);
+    // Nos-position utmed riktning
+    const nx = player.x + Math.cos(player.angle) * player.size;
+    const ny = player.y + Math.sin(player.angle) * player.size;
+    // Välj riktning
+    const dir = autoAim
+      ? getAutoAimDirection()
+      : { dx: Math.cos(player.angle), dy: Math.sin(player.angle) };
+    // Skapa kulor
+    bullets.push({ x:nx, y:ny, dx:dir.dx, dy:dir.dy, size:5, speed:10 });
+    if (multiShot){
+      bullets.push({ x:nx, y:ny, dx:dir.dx-0.3, dy:dir.dy, size:5, speed:10 });
+      bullets.push({ x:nx, y:ny, dx:dir.dx+0.3, dy:dir.dy, size:5, speed:10 });
+    }
+    fireCooldown = 8;
+  }
+
+  // --- Huvudloop med neon‐glow och twin‐stick ---
+  function loop(){
+    if (gameOver) return;
+
+    // --- Bakgrundsstjärnor ---
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    stars.forEach(s => {
+      s.y += s.speed;
+      if (s.y > canvas.height){
+        s.y = 0; s.x = Math.random() * canvas.width;
+      }
+      ctx.fillStyle = "white";
+      ctx.fillRect(s.x, s.y, s.size, s.size);
+    });
+
+    // --- Rörelse (WASD/pilar) ---
+    if (keys["w"] || keys["ArrowUp"])    player.y -= player.speed;
+    if (keys["s"] || keys["ArrowDown"])  player.y += player.speed;
+    if (keys["a"] || keys["ArrowLeft"])  player.x -= player.speed;
+    if (keys["d"] || keys["ArrowRight"]) player.x += player.speed;
+    // Håll inom skärmen
+    player.x = Math.max(0, Math.min(canvas.width, player.x));
+    player.y = Math.max(0, Math.min(canvas.height, player.y));
+
+    // --- Skjutning ---
+    fireCooldown--;
+    tryFire();
+
+    // --- Rita spelare med glow ---
+    ctx.save();
+    ctx.shadowBlur   = 20;
+    ctx.shadowColor  = "cyan";
+    ctx.translate(player.x, player.y);
+    ctx.rotate(player.angle);
+    ctx.drawImage(playerImg, -player.size, -player.size, player.size*2, player.size*2);
+    ctx.restore();
+    ctx.shadowBlur = 0;
+
+    // --- Skott med glow ---
+    bullets = bullets.filter(b => b.x > 0 && b.y > 0 && b.x < canvas.width && b.y < canvas.height);
+    bullets.forEach(b => {
+      b.x += b.dx * b.speed;
+      b.y += b.dy * b.speed;
+      ctx.save();
+      ctx.shadowBlur  = 10;
+      ctx.shadowColor = "white";
+      ctx.fillStyle   = "white";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.size, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+      ctx.shadowBlur = 0;
+    });
+
+    // --- Fiender med glow + rotation ---
+    enemies.forEach((e, ei) => {
+      const dx = player.x - e.x,
+            dy = player.y - e.y,
+            d  = Math.hypot(dx, dy);
+      e.angle = Math.atan2(dy, dx);
+      e.x += (dx/d) * e.speed;
+      e.y += (dy/d) * e.speed;
+
+      // Kollision spelare
+      if (d < player.size + e.size) {
+        enemies.splice(ei, 1);
+        lives--;
+        if (lives <= 0) {
+          alert("Game Over! Poäng: " + score);
+          return location.reload();
+        }
+      }
+
+      // Kollision skott
+      bullets.forEach((b, bi) => {
+        if (Math.hypot(b.x - e.x, b.y - e.y) < b.size + e.size) {
+          createParticles(e.x, e.y, "orange");
+          bullets.splice(bi, 1); enemies.splice(ei, 1); score++;
+        }
+      });
+
+      // Rita roterad fiende med glow
+      ctx.save();
+      ctx.shadowBlur  = 20;
+      ctx.shadowColor = "red";
+      ctx.translate(e.x, e.y);
+      ctx.rotate(e.angle);
+      ctx.drawImage(enemyImg, -e.size, -e.size, e.size*2, e.size*2);
+      ctx.restore();
+      ctx.shadowBlur = 0;
+    });
+
+    // --- Power-ups ---
+    powerUps.forEach((p, i) => {
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+      ctx.fill();
+      if (Math.hypot(player.x - p.x, player.y - p.y) < player.size + p.size) {
+        if (p.type === "multi")   { multiShot = true; setTimeout(()=>multiShot=false,5000); }
+        if (p.type === "autoaim") { autoAim   = true; setTimeout(()=>autoAim=false,5000); }
+        if (p.type === "health" && lives < maxLives) lives++;
+        powerUps.splice(i, 1);
+      }
+    });
+
+    // --- Bossar ---
+    bosses.forEach((b, bi) => {
+      const dx = player.x - b.x,
+            dy = player.y - b.y,
+            d  = Math.hypot(dx, dy);
+      b.angle = Math.atan2(dy, dx);
+      b.x += (dx/d) * b.speed;
+      b.y += (dy/d) * b.speed;
+
+      if (d < player.size + b.size) {
+        alert("Game Over! Boss träffade dig.\nPoäng: " + score);
+        return location.reload();
+      }
+
+      bullets.forEach((bu, biu) => {
+        if (Math.hypot(bu.x - b.x, bu.y - b.y) < bu.size + b.size) {
+          createParticles(b.x, b.y, "violet");
+          bullets.splice(biu, 1);
+          b.hp--;
+          if (b.hp <= 0) { bosses.splice(bi, 1); score += 10; }
+        }
+      });
+
+      // Rita roterad boss
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.angle);
+      ctx.drawImage(enemyImg, -b.size, -b.size, b.size*2, b.size*2);
+      ctx.restore();
+      // HP-bar
+      ctx.fillStyle = "white";
+      ctx.fillRect(b.x-30, b.y-b.size-10, 60, 6);
+      ctx.fillStyle = "red";
+      ctx.fillRect(b.x-30, b.y-b.size-10, 60 * (b.hp / (10 + level*2)), 6);
+    });
+
+    // --- Partiklar ---
+    particles.forEach((p, i) => {
+      p.x += p.dx; p.y += p.dy; p.life--;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, 2, 2);
+      if (p.life <= 0) particles.splice(i, 1);
+    });
+
+    // --- UI: Poäng, Liv, Nivå ---
+    ctx.fillStyle = "white";
+    ctx.font      = "20px sans-serif";
+    ctx.fillText(`Poäng: ${score}`, 20, 30);
+    ctx.fillText(`Liv:   ${lives}`, 20, 60);
+    ctx.fillText(`Nivå:  ${level}`, 20, 90);
+
+    // --- Nivåhantering ---
+    timeElapsed += 1/60;
+    if (timeElapsed >= 30) {
+      level++;
+      timeElapsed = 0;
+      enemies.forEach(e => e.speed += 0.3);
+      if (level % 3 === 0) spawnBoss();
+    }
+
+    requestAnimationFrame(loop);
+  }
+</script>
+</body>
+</html>
